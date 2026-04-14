@@ -4,128 +4,129 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// =============================
-// إعدادات Green API
-// =============================
 const INSTANCE_ID = process.env.INSTANCE_ID;
 const INSTANCE_TOKEN = process.env.INSTANCE_TOKEN;
 const GREEN_API = `https://api.green-api.com/waInstance${INSTANCE_ID}`;
-
-// =============================
-// بيانات العقارات
-// =============================
-const properties = [
-  { id: 1, type: 'شقة', neighborhood: 'المونسية', rooms: 4, area: 175, floor: 2, furnished: false, price: 42000, available: true },
-  { id: 2, type: 'شقة', neighborhood: 'النخيل', rooms: 3, area: 155, floor: 1, furnished: true, price: 48000, available: true },
-  { id: 3, type: 'فيلا', neighborhood: 'الروضة', rooms: 6, area: 380, floor: null, furnished: false, price: 110000, available: true },
-  { id: 4, type: 'شقة', neighborhood: 'المونسية', rooms: 3, area: 140, floor: 3, furnished: false, price: 36000, available: true },
-  { id: 5, type: 'دور', neighborhood: 'المونسية', rooms: 5, area: 250, floor: 1, furnished: false, price: 65000, available: true }
-];
-
 const OFFICE_PHONE = process.env.OFFICE_PHONE || '05XXXXXXXX';
 const OFFICE_NAME = process.env.OFFICE_NAME || 'مكتب المونسية العقاري';
 
-const sessions = {};
+const SHEET_ID = '17GagpV9kw4X3EmPp3q9zfVAauCP_GxahhErkFO9eayY';
+const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv`;
 
-function getSession(chatId) {
-  if (!sessions[chatId]) {
-    sessions[chatId] = { step: 'start', filters: {} };
+let propertiesCache = [];
+let lastFetch = 0;
+
+async function fetchProperties() {
+  const now = Date.now();
+  if (now - lastFetch < 5 * 60 * 1000 && propertiesCache.length > 0) return propertiesCache;
+  try {
+    const res = await axios.get(SHEET_URL);
+    const lines = res.data.trim().split('\n');
+    propertiesCache = lines.slice(1).map((row, i) => {
+      const cols = row.split(',').map(c => c.replace(/"/g, '').trim());
+      return {
+        id: i + 1,
+        type: cols[1] || '',
+        neighborhood: cols[2] || '',
+        rooms: parseInt(cols[3]) || 0,
+        area: parseInt(cols[4]) || 0,
+        price: parseInt(cols[5]) || 0,
+        furnished: cols[6] === 'نعم',
+        available: cols[7] === 'نعم',
+      };
+    }).filter(p => p.available && p.type);
+    lastFetch = now;
+    console.log(`تم تحميل ${propertiesCache.length} عقار`);
+  } catch (err) {
+    console.error('خطأ في الشيت:', err.message);
   }
-  return sessions[chatId];
+  return propertiesCache;
 }
 
-function resetSession(chatId) {
-  sessions[chatId] = { step: 'start', filters: {} };
+const sessions = {};
+function getSession(id) {
+  if (!sessions[id]) sessions[id] = { step: 'start', filters: {} };
+  return sessions[id];
 }
+function resetSession(id) { sessions[id] = { step: 'start', filters: {} }; }
 
 async function sendMessage(chatId, message) {
   try {
-    await axios.post(`${GREEN_API}/sendMessage/${INSTANCE_TOKEN}`, {
-      chatId,
-      message,
-    });
+    await axios.post(`${GREEN_API}/sendMessage/${INSTANCE_TOKEN}`, { chatId, message });
   } catch (err) {
-    console.error('خطأ في الإرسال:', err.message);
+    console.error('خطأ إرسال:', err.message);
   }
 }
 
-function filterProperties(filters) {
+function filterProperties(properties, filters) {
   return properties.filter(p => {
-    if (!p.available) return false;
     if (filters.type && p.type !== filters.type) return false;
     if (filters.neighborhood && p.neighborhood !== filters.neighborhood) return false;
     if (filters.rooms && p.rooms !== filters.rooms) return false;
-    if (filters.maxPrice && p.price > filters.maxPrice) return false;
     return true;
   });
 }
 
 function formatProperty(p) {
-  const furnished = p.furnished ? 'مفروش ✅' : 'غير مفروش';
-  const floor = p.floor ? `الدور ${p.floor}` : 'مستقل';
   return (
-    `🏢 *${p.type} — حي ${p.neighborhood}*\n` +
-    `📐 المساحة: ${p.area} م²\n` +
-    `🛏 الغرف: ${p.rooms} غرف\n` +
-    `🏗 الدور: ${floor}\n` +
-    `🛋 ${furnished}\n` +
-    `💰 الإيجار السنوي: *${p.price.toLocaleString()} ريال*`
+    `*${p.type} - حي ${p.neighborhood}*\n` +
+    `المساحة: ${p.area} م²\n` +
+    `الغرف: ${p.rooms}\n` +
+    `${p.furnished ? 'مفروش' : 'غير مفروش'}\n` +
+    `الايجار: *${p.price.toLocaleString()} ريال/سنة*`
   );
 }
 
 async function handleMessage(chatId, text) {
   const session = getSession(chatId);
   const msg = text.trim();
+  const properties = await fetchProperties();
+  const greetings = ['قائمة','البداية','مرحبا','مرحباً','هلا','اهلا','أهلا','السلام'];
 
-  if (msg === 'قائمة' || msg === 'البداية' || msg === 'مرحبا' || msg === 'مرحباً' || msg === 'هلا') {
+  if (greetings.some(w => msg.includes(w)) || session.step === 'start') {
     resetSession(chatId);
+    sessions[chatId].step = 'choose_type';
     await sendMessage(chatId,
-      `أهلاً وسهلاً 👋\nهذا *${OFFICE_NAME}*\n\n` +
-      `كيف أقدر أساعدك؟\n\n` +
-      `1️⃣ أبحث عن شقة\n` +
-      `2️⃣ أبحث عن فيلا\n` +
-      `3️⃣ أبحث عن دور\n` +
-      `4️⃣ عرض جميع العقارات\n\n` +
-      `اكتب رقم الاختيار أو اكتب نوع العقار مباشرة`
+      `أهلاً وسهلاً في *${OFFICE_NAME}* 👋\n\n` +
+      `1 - شقة\n2 - فيلا\n3 - دور\n4 - عرض الكل\n\nاكتب رقم اختيارك`
     );
-    session.step = 'choose_type';
     return;
   }
 
-  if (session.step === 'start' || session.step === 'choose_type') {
+  if (session.step === 'choose_type') {
     let type = null;
     if (msg === '1' || msg.includes('شقة') || msg.includes('شقه')) type = 'شقة';
     else if (msg === '2' || msg.includes('فيلا')) type = 'فيلا';
     else if (msg === '3' || msg.includes('دور')) type = 'دور';
-    else if (msg === '4' || msg.includes('الكل')) {
-      const all = filterProperties({});
-      if (all.length === 0) {
-        await sendMessage(chatId, 'لا توجد عقارات متاحة حالياً.');
-        return;
-      }
-      await sendMessage(chatId, `وجدت *${all.length} عقارات* متاحة:\n\n` + all.map(formatProperty).join('\n\n──────────\n\n'));
+    else if (msg === '4') {
+      if (!properties.length) { await sendMessage(chatId, 'لا يوجد عقارات متاحة.\n' + OFFICE_PHONE); return; }
+      await sendMessage(chatId, properties.map(formatProperty).join('\n\n---\n\n'));
+      await sendMessage(chatId, `للتواصل: *${OFFICE_PHONE}*`);
       resetSession(chatId);
       return;
     }
+    if (!type) { await sendMessage(chatId, 'اكتب رقم من 1 الى 4'); return; }
 
-    if (!type) {
-      await sendMessage(chatId, 'الرجاء اختيار نوع العقار (1-4) أو اكتب "قائمة" للبداية.');
-      return;
-    }
     session.filters.type = type;
+    const hoods = [...new Set(properties.filter(p => p.type === type).map(p => p.neighborhood))];
+    if (!hoods.length) {
+      await sendMessage(chatId, `لا يوجد ${type} متاحة.\nللتواصل: *${OFFICE_PHONE}*`);
+      resetSession(chatId); return;
+    }
+    session.neighborhoodOptions = hoods;
     session.step = 'choose_neighborhood';
-    await sendMessage(chatId, `ممتاز! أي حي تفضل؟\n1️⃣ المونسية\n2️⃣ النخيل\n3️⃣ الروضة\n4️⃣ أي حي`);
+    const list = hoods.map((n, i) => `${i+1} - ${n}`).join('\n');
+    await sendMessage(chatId, `اختر الحي:\n\n${list}\n${hoods.length+1} - أي حي`);
     return;
   }
 
   if (session.step === 'choose_neighborhood') {
-    if (msg === '1' || msg.includes('المونسية')) session.filters.neighborhood = 'المونسية';
-    else if (msg === '2' || msg.includes('النخيل')) session.filters.neighborhood = 'النخيل';
-    else if (msg === '3' || msg.includes('الروضة')) session.filters.neighborhood = 'الروضة';
+    const opts = session.neighborhoodOptions || [];
+    const num = parseInt(msg);
+    if (num >= 1 && num <= opts.length) session.filters.neighborhood = opts[num-1];
     else session.filters.neighborhood = null;
-
     session.step = 'choose_rooms';
-    await sendMessage(chatId, `كم عدد الغرف؟\n1️⃣ 3 غرف\n2️⃣ 4 غرف\n3️⃣ 5 غرف أو أكثر\n4️⃣ غير محدد`);
+    await sendMessage(chatId, `عدد الغرف:\n\n1 - 3 غرف\n2 - 4 غرف\n3 - 5 غرف+\n4 - غير محدد`);
     return;
   }
 
@@ -135,16 +136,30 @@ async function handleMessage(chatId, text) {
     else if (msg === '3') session.filters.rooms = 5;
     else session.filters.rooms = null;
 
-    const results = filterProperties(session.filters);
-    if (results.length === 0) {
-      await sendMessage(chatId, `لم أجد طلبك حالياً. تواصل معنا: ${OFFICE_PHONE}`);
-      resetSession(chatId);
-      return;
+    const results = filterProperties(properties, session.filters);
+    if (!results.length) {
+      await sendMessage(chatId, `لم نجد عقارات بهذه المواصفات.\nتواصل معنا: *${OFFICE_PHONE}*\n\nاكتب "قائمة" لبحث جديد`);
+      resetSession(chatId); return;
     }
-    await sendMessage(chatId, `🎯 النتائج:\n\n` + results.map(formatProperty).join('\n\n──────────\n\n'));
-    resetSession(chatId);
+    await sendMessage(chatId, `وجدنا ${results.length} عقار:\n\n` + results.map(formatProperty).join('\n\n---\n\n'));
+    session.step = 'show_results';
+    await sendMessage(chatId, `هل يناسبك احد العروض؟\n1 - نعم ابي اتواصل\n2 - بحث جديد`);
     return;
   }
+
+  if (session.step === 'show_results') {
+    if (msg === '1' || msg.includes('نعم')) {
+      await sendMessage(chatId, `للتواصل مع المكتب:\n📞 *${OFFICE_PHONE}*\n\nشكراً لك 🏢`);
+    } else {
+      sessions[chatId] = { step: 'choose_type', filters: {} };
+      await sendMessage(chatId, `اختر نوع العقار:\n1 - شقة\n2 - فيلا\n3 - دور\n4 - الكل`);
+      return;
+    }
+    resetSession(chatId); return;
+  }
+
+  await sendMessage(chatId, `اكتب "مرحبا" للبداية 👋`);
+  resetSession(chatId);
 }
 
 app.post('/webhook', async (req, res) => {
@@ -157,6 +172,9 @@ app.post('/webhook', async (req, res) => {
   await handleMessage(chatId, text);
 });
 
-app.get('/', (req, res) => res.send('البوت يعمل ✅'));
+app.get('/', (req, res) => res.send('البوت يعمل'));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`البوت يعمل على البورت ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`البوت على البورت ${PORT}`);
+  await fetchProperties();
+});
